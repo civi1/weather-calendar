@@ -1,6 +1,9 @@
 name: Update Weather ICS
 
 on:
+  push:
+    branches:
+      - main
   schedule:
     - cron: '0 0,6,12,18 * * *' # 하루 4번 자동 실행 (한국시간 9시, 15시, 21시, 03시)
   workflow_dispatch: # 수동 실행 버튼 생성
