@@ -2,23 +2,30 @@ name: Update Weather ICS
 
 on:
   schedule:
+    # KST 02:15, 05:15, 08:15, 11:15, 14:15, 17:15, 20:15, 23:15
+    # (KMA 단기예보 02/05/08/11/14/17/20/23시 발표 직후)
     - cron: '15 17,20,23,2,5,8,11,14 * * *'
+  repository_dispatch:
+    types: [update-weather-ics]
   push:
     paths:
       - 'update_calendar.py'
+      - 'requirements.txt'
+      - '.github/workflows/update.yml'
     branches:
       - main
   workflow_dispatch:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
+
+concurrency:
+  group: update-weather-ics
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # 🌟 여기에 위치시켜 보겠습니다.
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
@@ -28,31 +35,65 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        run: pip install requests pytz icalendar
+        run: pip install -r requirements.txt
 
       - name: Run update script
+        id: weather
         env:
+          # 필수
           KMA_API_KEY: ${{ secrets.KMA_API_KEY }}
           KMA_NX: ${{ secrets.KMA_NX }}
           KMA_NY: ${{ secrets.KMA_NY }}
           LOCATION_NAME: ${{ secrets.LOCATION_NAME }}
           REG_ID_TEMP: ${{ secrets.REG_ID_TEMP }}
           REG_ID_LAND: ${{ secrets.REG_ID_LAND }}
+          # 미세먼지 (공공데이터포털 / 에어코리아)
+          DATA_GO_KR_KEY: ${{ secrets.DATA_GO_KR_KEY }}
+          DATA_GO_KR_REGION: ${{ secrets.DATA_GO_KR_REGION }}
+          # 자외선/꽃가루 (공공데이터포털 / 생활·보건기상지수). 시군구 단위 행정표준코드.
+          LIVING_AREA_NO: ${{ secrets.LIVING_AREA_NO }}
+          # 선택 — 기상특보 필터
+          WRN_KEYWORDS: ${{ secrets.WRN_KEYWORDS }}
+          WRN_INCLUDE_WATCH: ${{ secrets.WRN_INCLUDE_WATCH }}
           TZ: Asia/Seoul
         run: python update_calendar.py
 
       - name: Commit and Push changes
         run: |
           KST_TIME=$(TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M:%S')
+          SUMMARY="${{ steps.weather.outputs.summary }}"
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add weather.ics
-          if [ -n "$(git status --porcelain)" ]; then
-            git commit -m "Update weather.ics [$KST_TIME KST]"
-            git push
-          else
-            echo "No changes to commit"
-          fi
+
+          # weather.ics 는 매 실행마다 완전 재생성되는 artifact라서
+          # 동시 실행과의 충돌 시 항상 우리 새 버전이 정답. 단순 재시도 루프로 처리.
+          for attempt in 1 2 3 4 5; do
+            # 매 시도마다 최신 origin/main 으로 리셋하고 우리 파일만 얹어 커밋
+            cp weather.ics /tmp/weather.ics.fresh
+            git fetch origin main
+            git reset --hard origin/main
+            cp /tmp/weather.ics.fresh weather.ics
+            git add weather.ics
+            if git diff --cached --quiet; then
+              echo "No changes after sync with origin/main"
+              exit 0
+            fi
+            if [ -n "$SUMMARY" ]; then
+              git commit -m "chore: update weather.ics — $SUMMARY [$KST_TIME KST]"
+            else
+              git commit -m "chore: update weather.ics [$KST_TIME KST]"
+            fi
+            if git push origin HEAD:main; then
+              echo "Push succeeded on attempt $attempt"
+              exit 0
+            fi
+            echo "Push attempt $attempt failed — another run pushed first, retrying..."
+            sleep $((attempt * 2))
+          done
+          echo "Push failed after 5 attempts"
+          exit 1
